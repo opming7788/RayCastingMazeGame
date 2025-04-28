@@ -38,7 +38,7 @@
     ```bash
     git clone https://github.com/你的帳號/你的倉庫.git
     ```
-2. 打開 `index.html` 即可直接在瀏覽器中遊玩。
+2. 瀏覽器打開 `RayCasting.html` 即可直接在瀏覽器中遊玩。
 
 ---
 
