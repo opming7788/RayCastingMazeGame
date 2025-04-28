@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Raycasting 游戏</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background-color: #f0f0f0;
+      }
+      canvas {
+        border: 1px solid #000;
+      }
+      .game-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .instructions {
+        margin-bottom: 10px;
+        font-size: 30px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="game-container">
+      <div class="instructions">
+        請按方向鍵移動(左右擺動視線，上下前進後退)，小心轉角卡住按後退鍵轉方向再前進
+      </div>
+      <canvas id="gameCanvas" width="800" height="400"></canvas>
+    </div>
+    <script>
+      // 游戏常量
+      const CANVAS_WIDTH = 800;
+      const CANVAS_HEIGHT = 400;
+      const playerBall_R = 8;
+
+      const FOV = Math.PI / 3;
+      const HALF_FOV = FOV / 2;
+      const CASTED_RAYS = 200;
+      const MAX_DEPTH = CANVAS_HEIGHT;
+      const STEP_ANGLE = FOV / CASTED_RAYS;
+      const SCALE = CANVAS_WIDTH / 2 / CASTED_RAYS;
+
+      // 获取Canvas和Context
+      const canvas = document.getElementById("gameCanvas");
+      const ctx = canvas.getContext("2d");
+
+      // 世界地图 - 1表示墙，0表示空间
+      const worldMap = [
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [1, 0, 1, 1, 0, 1, 1, 0, 1, 1],
+        [1, 0, 1, 0, 0, 1, 0, 0, 0, 1],
+        [1, 0, 1, 0, 1, 1, 1, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+        [1, 1, 0, 1, 1, 0, 1, 1, 1, 1],
+        [1, 1, 0, 0, 1, 0, 0, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 1, 0, 1, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      ];
+
+      // 游戏变量
+      const cellSize = CANVAS_WIDTH / worldMap.length / 2;
+      let playerX = CANVAS_WIDTH / 3 / 2;
+      let playerY = CANVAS_HEIGHT / 3;
+      let playerAngle = 0; // 玩家朝向角度
+      let keyPressed = {
+        ArrowLeft: false,
+        ArrowRight: false,
+        ArrowUp: false,
+        ArrowDown: false,
+      };
+
+      // Canvas辅助类
+      class CanvasHelper {
+        constructor(ctx) {
+          this.ctx = ctx;
+          this.objects = {};
+          this.nextId = 0;
+        }
+
+        // 清除Canvas
+        clear() {
+          this.ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+          this.objects = {};
+          this.nextId = 0;
+        }
+
+        // 创建矩形
+        createRectangle(x1, y1, x2, y2, color) {
+          const id = this.nextId++;
+          this.objects[id] = {
+            type: "rectangle",
+            x: x1,
+            y: y1,
+            width: x2 - x1,
+            height: y2 - y1,
+            color: color,
+            outlineColor: "black",
+          };
+          this._drawObject(id);
+          return id;
+        }
+
+        // 创建椭圆
+        createOval(x1, y1, x2, y2, color, outline = "") {
+          const id = this.nextId++;
+          this.objects[id] = {
+            type: "oval",
+            x: (x1 + x2) / 2,
+            y: (y1 + y2) / 2,
+            radiusX: Math.abs(x2 - x1) / 2,
+            radiusY: Math.abs(y2 - y1) / 2,
+            color: color,
+            outline: outline,
+          };
+          this._drawObject(id);
+          return id;
+        }
+
+        // 创建线段
+        createLine(x1, y1, x2, y2, color) {
+          const id = this.nextId++;
+          this.objects[id] = {
+            type: "line",
+            x1: x1,
+            y1: y1,
+            x2: x2,
+            y2: y2,
+            color: color,
+          };
+          this._drawObject(id);
+          return id;
+        }
+
+        // 设置轮廓颜色
+        setOutlineColor(id, options) {
+          const obj = this.objects[id];
+          if (obj) {
+            obj.outlineColor = options.color || "black";
+            this._drawAll();
+          }
+        }
+
+        // 移动对象
+        move(id, dx, dy) {
+          const obj = this.objects[id];
+          if (!obj) return;
+
+          if (obj.type === "oval") {
+            obj.x += dx;
+            obj.y += dy;
+          } else if (obj.type === "line") {
+            obj.x1 += dx;
+            obj.y1 += dy;
+            obj.x2 += dx;
+            obj.y2 += dy;
+          }
+          this._drawAll();
+        }
+
+        // 删除对象
+        delete(id) {
+          if (this.objects[id]) {
+            delete this.objects[id];
+            this._drawAll();
+          }
+        }
+
+        // 获取左上角x坐标
+        getLeftX(id) {
+          const obj = this.objects[id];
+          if (!obj) return 0;
+
+          if (obj.type === "rectangle") {
+            return obj.x;
+          } else if (obj.type === "oval") {
+            return obj.x - obj.radiusX;
+          }
+          return 0;
+        }
+
+        // 获取顶部y坐标
+        getTopY(id) {
+          const obj = this.objects[id];
+          if (!obj) return 0;
+
+          if (obj.type === "rectangle") {
+            return obj.y;
+          } else if (obj.type === "oval") {
+            return obj.y - obj.radiusY;
+          }
+          return 0;
+        }
+
+        // 查找重叠对象
+        findOverlapping(x1, y1, x2, y2) {
+          const overlappingIds = [];
+          for (const id in this.objects) {
+            const obj = this.objects[id];
+            if (obj.type === "rectangle") {
+              if (
+                !(
+                  obj.x + obj.width < x1 ||
+                  obj.x > x2 ||
+                  obj.y + obj.height < y1 ||
+                  obj.y > y2
+                )
+              ) {
+                overlappingIds.push(parseInt(id));
+              }
+            } else if (obj.type === "oval") {
+              // 简单的边界框检测，不是精确的椭圆碰撞
+              const objX1 = obj.x - obj.radiusX;
+              const objY1 = obj.y - obj.radiusY;
+              const objX2 = obj.x + obj.radiusX;
+              const objY2 = obj.y + obj.radiusY;
+              if (!(objX2 < x1 || objX1 > x2 || objY2 < y1 || objY1 > y2)) {
+                overlappingIds.push(parseInt(id));
+              }
+            }
+          }
+          return overlappingIds;
+        }
+
+        // 绘制对象
+        _drawObject(id) {
+          const obj = this.objects[id];
+          if (!obj) return;
+
+          this.ctx.save();
+
+          if (obj.type === "rectangle") {
+            this.ctx.fillStyle = obj.color;
+            this.ctx.fillRect(obj.x, obj.y, obj.width, obj.height);
+            if (obj.outlineColor) {
+              this.ctx.strokeStyle = obj.outlineColor;
+              this.ctx.strokeRect(obj.x, obj.y, obj.width, obj.height);
+            }
+          } else if (obj.type === "oval") {
+            this.ctx.beginPath();
+            this.ctx.ellipse(
+              obj.x,
+              obj.y,
+              obj.radiusX,
+              obj.radiusY,
+              0,
+              0,
+              Math.PI * 2
+            );
+            this.ctx.fillStyle = obj.color;
+            this.ctx.fill();
+            if (obj.outline) {
+              this.ctx.strokeStyle = obj.outline;
+              this.ctx.stroke();
+            }
+          } else if (obj.type === "line") {
+            this.ctx.beginPath();
+            this.ctx.moveTo(obj.x1, obj.y1);
+            this.ctx.lineTo(obj.x2, obj.y2);
+            this.ctx.strokeStyle = obj.color;
+            this.ctx.stroke();
+          }
+
+          this.ctx.restore();
+        }
+
+        // 重绘所有对象
+        _drawAll() {
+          this.ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+          for (const id in this.objects) {
+            this._drawObject(id);
+          }
+        }
+      }
+
+      // 创建Canvas助手
+      const canvasHelper = new CanvasHelper(ctx);
+
+      // 设置键盘事件监听
+      window.addEventListener("keydown", (e) => {
+        if (e.key in keyPressed) {
+          keyPressed[e.key] = true;
+        }
+      });
+
+      window.addEventListener("keyup", (e) => {
+        if (e.key in keyPressed) {
+          keyPressed[e.key] = false;
+        }
+      });
+
+      // 获取对象位置
+      function getLocation(canvas, obj) {
+        const leftX = canvas.getLeftX(obj);
+        const topY = canvas.getTopY(obj);
+        const objCenterX = leftX + playerBall_R;
+        const objCenterY = topY + playerBall_R;
+        return [objCenterX, objCenterY];
+      }
+
+      // 创建FOV线
+      function createFov(canvas, player, playerAngle) {
+        const lineWidth = 30;
+        const fovLines = [];
+        const [playerX, playerY] = getLocation(canvas, player);
+
+        const lineDir = canvas.createLine(
+          playerX,
+          playerY,
+          playerX + Math.sin(playerAngle) * lineWidth,
+          playerY + Math.cos(playerAngle) * lineWidth,
+          "blue"
+        );
+        fovLines.push(lineDir);
+
+        const lineFovR = canvas.createLine(
+          playerX,
+          playerY,
+          playerX + Math.sin(playerAngle + HALF_FOV) * lineWidth,
+          playerY + Math.cos(playerAngle + HALF_FOV) * lineWidth,
+          "blue"
+        );
+        fovLines.push(lineFovR);
+
+        const lineFovL = canvas.createLine(
+          playerX,
+          playerY,
+          playerX + Math.sin(playerAngle - HALF_FOV) * lineWidth,
+          playerY + Math.cos(playerAngle - HALF_FOV) * lineWidth,
+          "blue"
+        );
+        fovLines.push(lineFovL);
+
+        return fovLines;
+      }
+
+      // 向量长度
+      function vectorLength(a) {
+        return Math.sqrt(a[0] ** 2 + a[1] ** 2);
+      }
+
+      // 向量减法
+      function subtractVector(aCord, bCord) {
+        return [aCord[0] - bCord[0], aCord[1] - bCord[1]];
+      }
+
+      // DDA算法实现光线投射
+      function DDA(canvas, player, startAngle, cellSize, worldMap) {
+        const [playerX, playerY] = getLocation(canvas, player);
+        const xCor = playerX % cellSize;
+        const yCor = playerY % cellSize;
+
+        let startAngleMod;
+        if (startAngle < 0) {
+          startAngleMod = 2 * Math.PI - (Math.abs(startAngle) % (2 * Math.PI));
+        } else {
+          startAngleMod = startAngle % (2 * Math.PI);
+        }
+
+        let nx, ny;
+        if (startAngleMod >= 0 && startAngleMod <= Math.PI) {
+          nx = cellSize - xCor;
+        } else {
+          nx = -xCor;
+        }
+
+        if (
+          startAngleMod >= Math.PI / 2 &&
+          startAngleMod <= (Math.PI * 3) / 2
+        ) {
+          ny = -yCor;
+        } else {
+          ny = cellSize - yCor;
+        }
+
+        let nstpx = 0;
+        let nstpy = 0;
+
+        while (true) {
+          let vstepx, hstepy;
+          if (startAngleMod >= 0 && startAngleMod <= Math.PI) {
+            vstepx = nx + nstpx * cellSize;
+          } else {
+            vstepx = nx - nstpx * cellSize;
+          }
+
+          if (
+            startAngleMod >= Math.PI / 2 &&
+            startAngleMod <= (Math.PI * 3) / 2
+          ) {
+            hstepy = ny - nstpy * cellSize;
+          } else {
+            hstepy = ny + nstpy * cellSize;
+          }
+
+          const condA =
+            startAngleMod >= Math.PI / 2 && startAngleMod <= Math.PI;
+          const condB =
+            startAngleMod >= (Math.PI * 3) / 2 && startAngleMod <= 2 * Math.PI;
+          const condC =
+            startAngleMod >= Math.PI && startAngleMod <= (Math.PI * 3) / 2;
+          const condD = startAngleMod >= 0 && startAngleMod <= Math.PI / 2;
+
+          let verIntercepCord, horIntercepCord;
+          if (condA || condB) {
+            verIntercepCord = [
+              playerX + vstepx,
+              playerY - vstepx / Math.abs(Math.tan(startAngle + 1e-16)),
+            ];
+            horIntercepCord = [
+              playerX - hstepy * Math.abs(Math.tan(startAngle)),
+              playerY + hstepy,
+            ];
+          }
+          if (condC || condD) {
+            verIntercepCord = [
+              playerX + vstepx,
+              playerY + vstepx / Math.abs(Math.tan(startAngle + 1e-16)),
+            ];
+            horIntercepCord = [
+              playerX + hstepy * Math.abs(Math.tan(startAngle)),
+              playerY + hstepy,
+            ];
+          }
+
+          const disver = Math.abs(vstepx / Math.sin(startAngle + 1e-16));
+          const dishor = Math.abs(hstepy / Math.cos(startAngle + 1e-16));
+
+          let col, row;
+          let wallCord;
+
+          if (disver > dishor) {
+            if (condA) {
+              col = Math.floor(horIntercepCord[0] / cellSize);
+              row = Math.floor((horIntercepCord[1] - 1) / cellSize);
+            } else if (condB) {
+              col = Math.floor((horIntercepCord[0] - 1) / cellSize);
+              row = Math.floor((horIntercepCord[1] + 1) / cellSize);
+            } else if (condC) {
+              col = Math.floor((horIntercepCord[0] - 1) / cellSize);
+              row = Math.floor((horIntercepCord[1] - 1) / cellSize);
+            } else {
+              col = Math.floor((horIntercepCord[0] + 1) / cellSize);
+              row = Math.floor((horIntercepCord[1] + 1) / cellSize);
+            }
+
+            // 检查边界
+            if (
+              row < 0 ||
+              row >= worldMap.length ||
+              col < 0 ||
+              col >= worldMap[0].length
+            ) {
+              nstpy += 1;
+              continue;
+            }
+
+            if (worldMap[row][col] === 1) {
+              const drawray = canvas.createLine(
+                playerX,
+                playerY,
+                horIntercepCord[0],
+                horIntercepCord[1],
+                "green"
+              );
+              wallCord = [horIntercepCord[0], horIntercepCord[1]];
+              return [drawray, wallCord];
+            }
+            nstpy += 1;
+          } else {
+            if (condA) {
+              col = Math.floor((verIntercepCord[0] + 1) / cellSize);
+              row = Math.floor(verIntercepCord[1] / cellSize);
+            } else if (condB) {
+              col = Math.floor((verIntercepCord[0] - 1) / cellSize);
+              row = Math.floor((verIntercepCord[1] + 1) / cellSize);
+            } else if (condC) {
+              col = Math.floor((verIntercepCord[0] - 1) / cellSize);
+              row = Math.floor((verIntercepCord[1] - 1) / cellSize);
+            } else {
+              col = Math.floor((verIntercepCord[0] + 1) / cellSize);
+              row = Math.floor((verIntercepCord[1] + 1) / cellSize);
+            }
+
+            // 检查边界
+            if (
+              row < 0 ||
+              row >= worldMap.length ||
+              col < 0 ||
+              col >= worldMap[0].length
+            ) {
+              nstpx += 1;
+              continue;
+            }
+
+            if (worldMap[row][col] === 1) {
+              const drawray = canvas.createLine(
+                playerX,
+                playerY,
+                verIntercepCord[0],
+                verIntercepCord[1],
+                "green"
+              );
+              wallCord = [verIntercepCord[0], verIntercepCord[1]];
+              return [drawray, wallCord];
+            }
+            nstpx += 1;
+          }
+
+          // 防止无限循环
+          if (nstpx > 50 || nstpy > 50) {
+            return [null, [playerX, playerY]];
+          }
+        }
+      }
+
+      // 光线投射
+      function rayCast(canvas, player, playerAngle, cellSize, worldMap) {
+        const rays = [];
+        const walls = [];
+        const [playerX, playerY] = getLocation(canvas, player);
+
+        let startAngle = playerAngle + HALF_FOV;
+
+        for (let ray = 0; ray <= CASTED_RAYS; ray++) {
+          const [drawray, wallCord] = DDA(
+            canvas,
+            player,
+            startAngle,
+            cellSize,
+            worldMap
+          );
+
+          if (drawray !== null) {
+            rays.push(drawray);
+
+            const depth = vectorLength(
+              subtractVector(wallCord, [playerX, playerY])
+            );
+
+            // 计算颜色基于深度
+            const color = Math.floor(255 / (1 + depth * depth * 0.00007));
+            const colorHex = `rgb(${color},${color},${color})`;
+
+            // 修正鱼眼效果
+            const correctedDepth = depth * Math.cos(playerAngle - startAngle);
+
+            // 计算墙高
+            let wallHeight = 15000 / (correctedDepth + 0.0001);
+
+            // 修正卡墙
+            if (wallHeight > CANVAS_HEIGHT) {
+              wallHeight = CANVAS_HEIGHT;
+            }
+
+            const wallRec = canvas.createRectangle(
+              CANVAS_HEIGHT + ray * SCALE,
+              CANVAS_HEIGHT / 2 - wallHeight / 2,
+              CANVAS_HEIGHT + ray * SCALE + SCALE,
+              CANVAS_HEIGHT / 2 - wallHeight / 2 + wallHeight,
+              colorHex
+            );
+
+            walls.push(wallRec);
+          }
+
+          startAngle -= STEP_ANGLE;
+        }
+
+        return [rays, walls];
+      }
+
+      // 碰撞检测和移动
+      function collisionMove(
+        canvas,
+        player,
+        fovLines,
+        playerAngle,
+        dx,
+        dy,
+        rays
+      ) {
+        const leftX = canvas.getLeftX(player);
+        const topY = canvas.getTopY(player);
+
+        const objs = canvas.findOverlapping(
+          leftX,
+          topY,
+          leftX + 2 * playerBall_R,
+          topY + 2 * playerBall_R
+        );
+
+        for (const i of fovLines) {
+          const index = objs.indexOf(i);
+          if (index !== -1) {
+            objs.splice(index, 1);
+          }
+        }
+
+        for (const i of rays) {
+          const index = objs.indexOf(i);
+          if (index !== -1) {
+            objs.splice(index, 1);
+          }
+        }
+
+        if (objs.length > 1) {
+          canvas.move(player, -dx, -dy);
+
+          for (const i of fovLines) {
+            canvas.delete(i);
+          }
+
+          return createFov(canvas, player, playerAngle);
+        }
+
+        return fovLines;
+      }
+
+      // 游戏初始化
+      function init() {
+        // 绘制背景
+        const background3DFloor = canvasHelper.createRectangle(
+          CANVAS_WIDTH / 2,
+          CANVAS_HEIGHT / 2,
+          CANVAS_WIDTH,
+          CANVAS_HEIGHT,
+          "#949449"
+        );
+        const background3DSky = canvasHelper.createRectangle(
+          CANVAS_WIDTH / 2,
+          0,
+          CANVAS_WIDTH,
+          CANVAS_HEIGHT / 2,
+          "#F0F0F0"
+        );
+
+        // 绘制地图
+        for (let i = 0; i < worldMap.length; i++) {
+          for (let j = 0; j < worldMap[0].length; j++) {
+            if (worldMap[i][j] > 0) {
+              const rect = canvasHelper.createRectangle(
+                j * cellSize,
+                i * cellSize,
+                (j + 1) * cellSize,
+                (i + 1) * cellSize,
+                "red"
+              );
+              canvasHelper.setOutlineColor(rect, { color: "black" });
+            }
+          }
+        }
+
+        // 创建玩家
+        const player = canvasHelper.createOval(
+          playerX - playerBall_R,
+          playerY - playerBall_R,
+          playerX + playerBall_R,
+          playerY + playerBall_R,
+          "blue",
+          "black"
+        );
+
+        // 创建视角线
+        let fovLines = createFov(canvasHelper, player, playerAngle);
+
+        // 光线投射
+        let [rays, walls] = rayCast(
+          canvasHelper,
+          player,
+          playerAngle,
+          cellSize,
+          worldMap
+        );
+
+        // 游戏循环
+        function gameLoop() {
+          let dx = 0;
+          let dy = 0;
+
+          if (keyPressed.ArrowLeft) {
+            playerAngle += 0.1;
+
+            for (const i of fovLines) {
+              canvasHelper.delete(i);
+            }
+            fovLines = createFov(canvasHelper, player, playerAngle);
+
+            for (const i of rays) {
+              canvasHelper.delete(i);
+            }
+            rays = [];
+
+            for (const i of walls) {
+              canvasHelper.delete(i);
+            }
+            walls = [];
+
+            [rays, walls] = rayCast(
+              canvasHelper,
+              player,
+              playerAngle,
+              cellSize,
+              worldMap
+            );
+          }
+
+          if (keyPressed.ArrowRight) {
+            playerAngle -= 0.1;
+
+            for (const i of fovLines) {
+              canvasHelper.delete(i);
+            }
+            fovLines = createFov(canvasHelper, player, playerAngle);
+
+            for (const i of rays) {
+              canvasHelper.delete(i);
+            }
+            rays = [];
+
+            for (const i of walls) {
+              canvasHelper.delete(i);
+            }
+            walls = [];
+
+            [rays, walls] = rayCast(
+              canvasHelper,
+              player,
+              playerAngle,
+              cellSize,
+              worldMap
+            );
+          }
+
+          if (keyPressed.ArrowUp) {
+            dx = Math.sin(playerAngle) * 5;
+            dy = Math.cos(playerAngle) * 5;
+            canvasHelper.move(player, dx, dy);
+
+            for (const i of fovLines) {
+              canvasHelper.delete(i);
+            }
+            fovLines = createFov(canvasHelper, player, playerAngle);
+
+            for (const i of rays) {
+              canvasHelper.delete(i);
+            }
+            rays = [];
+
+            for (const i of walls) {
+              canvasHelper.delete(i);
+            }
+            walls = [];
+
+            [rays, walls] = rayCast(
+              canvasHelper,
+              player,
+              playerAngle,
+              cellSize,
+              worldMap
+            );
+          }
+
+          if (keyPressed.ArrowDown) {
+            dx = -Math.sin(playerAngle) * 5;
+            dy = -Math.cos(playerAngle) * 5;
+            canvasHelper.move(player, dx, dy);
+
+            for (const i of fovLines) {
+              canvasHelper.delete(i);
+            }
+            fovLines = createFov(canvasHelper, player, playerAngle);
+
+            for (const i of rays) {
+              canvasHelper.delete(i);
+            }
+            rays = [];
+
+            for (const i of walls) {
+              canvasHelper.delete(i);
+            }
+            walls = [];
+
+            [rays, walls] = rayCast(
+              canvasHelper,
+              player,
+              playerAngle,
+              cellSize,
+              worldMap
+            );
+          }
+
+          // 碰撞检测
+          fovLines = collisionMove(
+            canvasHelper,
+            player,
+            fovLines,
+            playerAngle,
+            dx,
+            dy,
+            rays
+          );
+
+          // 下一帧
+          requestAnimationFrame(gameLoop);
+        }
+
+        // 开始游戏循环
+        gameLoop();
+      }
+
+      // 启动游戏
+      window.onload = init;
+    </script>
+  </body>
+</html>
