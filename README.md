@@ -2,7 +2,7 @@
 
 使用 HTML、CSS、JavaScript 開發的基於 **射線投射 (Raycasting)** 技術的 3D 迷宮探索遊戲。  
 玩家可以透過 **鍵盤方向鍵** 在迷宮中移動，體驗類似早期 3D 遊戲（如 Wolfenstein 3D）的第一人稱視角效果。
-
+<a href="https://opming7788.github.io/RayCastingMazeGame/RayCasting.html">開始遊玩</a>
 ---
 
 ## 遊戲特色
